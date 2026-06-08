@@ -13,6 +13,8 @@
 
 import collections
 import copy
+from typing import Iterable, Iterator, Optional, Sequence
+import cirq
 import numpy
 from openfermion.ops.operators import QubitOperator
 import openfermion.utils as utils
@@ -20,8 +22,8 @@ import openfermion.utils as utils
 """
 Description:
     Functions for estimating the exponential of an operator
-    composed of Pauli matrices, by Trotterization. Outputs QASM
-    format to a python stream.
+    composed of Pauli matrices, by Trotterization. Outputs either
+    a Cirq circuit or QASM format to a python stream.
 
     Change-of-basis gates:
     H           : Z to X basis (and back)
@@ -315,3 +317,129 @@ def trotterize_exp_qubop_to_qasm(
             [trotterized_op], evolution_time=evolution_time, qubit_list=qubit_list, ancilla=ancilla
         ):
             yield exponentiated_qasm_string
+
+
+def pauli_exp_to_cirq(
+    qubit_operator_list: Iterable[QubitOperator],
+    qubits: Sequence[cirq.Qid],
+    evolution_time: float = 1.0,
+    ancilla: Optional[cirq.Qid] = None,
+) -> Iterator[cirq.Operation]:
+    """Exponentiate a list of QubitOperators to Cirq operations.
+
+    Exponentiates a list of QubitOperators, and yields Cirq operations
+        using the formula:  exp(-1.0j * evolution_time * op).
+
+    Args:
+        qubit_operator_list (list of QubitOperators): list of single Pauli-term
+            QubitOperators to be exponentiated.
+        qubits (sequence of cirq.Qid): qubits to apply operations to.
+        evolution_time (float): evolution time of the operators in the list.
+        ancilla (cirq.Qid, optional): if present, control qubit.
+
+    Yields:
+        cirq.Operation
+    """
+    num_qubits = max([utils.count_qubits(qubit_operator) for qubit_operator in qubit_operator_list])
+    if len(qubits) < num_qubits:
+        raise TypeError('qubits must have an entry for every qubit')
+
+    for qubit_operator in qubit_operator_list:
+        for term in qubit_operator.terms:
+            term_coeff = qubit_operator.terms[term]
+
+            # Force float
+            term_coeff = float(numpy.real(term_coeff))
+
+            # List of operators and list of qubit ids
+            ops = []
+            qids = []
+            basis_rotations_1 = []
+            basis_rotations_2 = []
+
+            for p in term:
+                qid = qubits[p[0]]
+                pop = p[1]
+
+                qids.append(qid)
+                ops.append(pop)
+
+                if pop == 'X':
+                    basis_rotations_1.append(cirq.H(qid))
+                    basis_rotations_2.append(cirq.H(qid))
+                elif pop == 'Y':
+                    basis_rotations_1.append(cirq.rx(numpy.pi / 2)(qid))
+                    basis_rotations_2.append(cirq.rx(-numpy.pi / 2)(qid))
+
+            # Prep for CNOTs
+            cnots1 = []
+            cnots2 = []
+            for i in range(len(qids) - 1):
+                cnots1.append(cirq.CNOT(qids[i], qids[i + 1]))
+            for i in reversed(range(len(qids) - 1)):
+                cnots2.append(cirq.CNOT(qids[i], qids[i + 1]))
+
+            # 1. Perform basis rotations
+            for op in basis_rotations_1:
+                yield op
+
+            # 2. First set CNOTs
+            for op in cnots1:
+                yield op
+
+            # 3. Rotation
+            theta = term_coeff * evolution_time
+            if ancilla is not None:
+                if len(qids) > 0:
+                    yield (cirq.CZ ** (2 * theta / numpy.pi)).on(ancilla, qids[-1])
+                    yield cirq.rz(-theta)(ancilla)
+                else:
+                    yield cirq.rz(-theta)(ancilla)
+            else:
+                if len(qids) > 0:
+                    yield cirq.rz(2 * theta)(qids[-1])
+
+            # 4. Second set of CNOTs
+            for op in cnots2:
+                yield op
+
+            # 5. Rotate back to Z basis
+            for op in basis_rotations_2:
+                yield op
+
+
+def trotterize_exp_qubop_to_circuit(
+    hamiltonian: QubitOperator,
+    qubits: Sequence[cirq.Qid],
+    evolution_time: float = 1.0,
+    trotter_number: int = 1,
+    trotter_order: int = 1,
+    term_ordering: Optional[Sequence] = None,
+    k_exp: float = 1.0,
+    ancilla: Optional[cirq.Qid] = None,
+) -> cirq.Circuit:
+    """Trotterize a Qubit Hamiltonian to a Cirq Circuit.
+
+    Args:
+        hamiltonian (QubitOperator): Hamiltonian.
+        qubits (sequence of cirq.Qid): Qubits to apply operations to.
+        evolution_time (float): evolution time.
+        trotter_number (int): number of Trotter steps.
+        trotter_order (int): order of Trotterization.
+        term_ordering (list, optional): order of terms.
+        k_exp (float): exponential factor.
+        ancilla (cirq.Qid, optional): control qubit.
+
+    Returns:
+        cirq.Circuit
+    """
+    circuit = cirq.Circuit()
+    for trotterized_op in trotter_operator_grouping(
+        hamiltonian, trotter_number, trotter_order, term_ordering, k_exp
+    ):
+        circuit.append(
+            pauli_exp_to_cirq(
+                [trotterized_op], qubits, evolution_time=evolution_time, ancilla=ancilla
+            )
+        )
+    return circuit

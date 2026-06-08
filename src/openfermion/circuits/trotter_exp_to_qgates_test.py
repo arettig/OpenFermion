@@ -12,7 +12,11 @@
 """Tests for trotter_exp_to_qgates.py"""
 
 import unittest
+import cirq
+import scipy.sparse.linalg
+import numpy
 
+from openfermion.linalg import get_sparse_operator
 from openfermion.ops.operators import QubitOperator
 
 from openfermion.utils.operator_utils import count_qubits
@@ -22,6 +26,8 @@ from openfermion.circuits.trotter_exp_to_qgates import (
     _third_order_trotter_helper,
     trotterize_exp_qubop_to_qasm,
     pauli_exp_to_qasm,
+    trotterize_exp_qubop_to_circuit,
+    pauli_exp_to_cirq,
 )
 
 
@@ -358,3 +364,61 @@ CNOT 3 4'''
             self.assertEqual(qasmstr, strcorrect1)
         except:
             self.assertEqual(qasmstr, strcorrect2)
+
+    def test_trotterize_to_circuit(self):
+        pauli = QubitOperator("X0 Z1 Y2")
+        qubits = cirq.LineQubit.range(3)
+        circuit = trotterize_exp_qubop_to_circuit(
+            pauli, qubits, evolution_time=1.0, trotter_number=1
+        )
+        circuit_unitary = circuit.unitary(qubit_order=qubits)
+
+        # generate exact unitary operator
+        sparse = get_sparse_operator(-1j * pauli, n_qubits=3)
+        exact_unitary = scipy.sparse.linalg.expm(sparse).toarray()
+
+        self.assertTrue(cirq.linalg.allclose_up_to_global_phase(exact_unitary, circuit_unitary))
+
+    def test_controlled_trotterize_to_circuit(self):
+        pauli = QubitOperator("X0 Z1 Y2")
+        system_qubits = cirq.LineQubit.range(3)
+        ancilla = cirq.LineQubit(3)
+        all_qubits = system_qubits + [ancilla]
+
+        circuit = trotterize_exp_qubop_to_circuit(
+            pauli, system_qubits, evolution_time=1.0, trotter_number=1, ancilla=ancilla
+        )
+        circuit_unitary = circuit.unitary(qubit_order=all_qubits)
+
+        # exact controlled unitary
+        pauliStr = cirq.PauliString(
+            cirq.X(system_qubits[0]), cirq.Z(system_qubits[1]), cirq.Y(system_qubits[2])
+        )
+        expgate = numpy.exp(-1j * pauliStr)
+        controlled_op = expgate.controlled_by(ancilla)
+        exact_controlled_unitary = cirq.Circuit(controlled_op).unitary(qubit_order=all_qubits)
+
+        self.assertTrue(
+            cirq.linalg.allclose_up_to_global_phase(exact_controlled_unitary, circuit_unitary)
+        )
+
+    def test_controlled_trotterize_identity_to_circuit(self):
+        coeff = 4.867
+        pauli = QubitOperator("", coefficient=coeff)
+        system_qubits = cirq.LineQubit.range(3)
+        ancilla = cirq.LineQubit(3)
+        all_qubits = system_qubits + [ancilla]
+
+        circuit = trotterize_exp_qubop_to_circuit(
+            pauli, system_qubits, evolution_time=1.0, trotter_number=1, ancilla=ancilla
+        )
+        circuit_unitary = circuit.unitary(qubit_order=all_qubits)
+
+        # exact controlled unitary manually
+        diag = numpy.ones(16, dtype=complex)
+        diag[1::2] = numpy.exp(-coeff * 1.0j)
+        exact_controlled_unitary = numpy.diag(diag)
+
+        self.assertTrue(
+            cirq.linalg.allclose_up_to_global_phase(exact_controlled_unitary, circuit_unitary)
+        )
